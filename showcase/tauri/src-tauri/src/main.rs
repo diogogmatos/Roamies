@@ -1483,11 +1483,37 @@ fn watch_screens(app: AppHandle) {
 // cursor in its own CSS pixels. Every ~2 s, refresh the safe area (the Dock can move, auto-hide or resize).
 // Each sample carries the time it was read (ms since launch), so the overlay can replay the cursor's path at an
 // even pace instead of whenever samples happen to arrive (which made the Sidekick stutter when following it).
+// Shared with `--at` (cursor_at), whose one sample must be on the same clock.
+static CURSOR_CLOCK: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// `--at X,Y`: the cursor in screen pixels, from a launcher that can see it (a KWin script on Wayland, where the app
+/// can't). Sent to the overlays as one cursor sample, so the action that follows starts beside it.
+fn cursor_at(app: &AppHandle, args: &[String]) -> bool {
+    let Some((gx, gy)) = cli_at(args) else { return false };
+    let t = CURSOR_CLOCK.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0;
+    for (label, w) in app.webview_windows() {
+        if !is_overlay(&label) {
+            continue;
+        }
+        let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor()) else { continue };
+        let (x, y) = ((gx - pos.x as f64) / scale, (gy - pos.y as f64) / scale);
+        let _ = w.eval(format!("window.__roamiePtr&&__roamiePtr({x:.1},{y:.1},{t:.1})"));
+    }
+    true
+}
+
+fn cli_at(args: &[String]) -> Option<(f64, f64)> {
+    let i = args.iter().position(|a| a == "--at")?;
+    let (x, y) = args.get(i + 1)?.split_once(',')?;
+    let (x, y) = (x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?);
+    (x.is_finite() && y.is_finite()).then_some((x, y))
+}
+
 fn pump_cursor(app: AppHandle) {
     let mut n: u32 = 0;
     let mut primary_scale = 1.0;
-    let start = std::time::Instant::now();
-    let mut next = start;
+    let start = *CURSOR_CLOCK.get_or_init(Instant::now);
+    let mut next = Instant::now();
     let mut sent: std::collections::HashMap<String, (f64, f64)> = std::collections::HashMap::new();
     let mut last_raw = (f64::NAN, f64::NAN);
     let mut was_down = false;
@@ -1914,6 +1940,20 @@ fn cli_action(args: &[String]) -> Option<&'static str> {
 /// Roamie and, on Windows and Linux, opens the panel: Windows 11 hides a new tray icon behind the ^ arrow and many
 /// Linux desktops show none, so opening Roamies again from the Start menu or the app list is the way in.
 fn second_launch(app: &AppHandle, args: &[String]) {
+    // The page reads the cursor once a frame: give it a few before the action looks for it.
+    if cursor_at(app, args) {
+        let (app, args) = (app.clone(), args.to_vec());
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            let a = app.clone();
+            let _ = app.run_on_main_thread(move || run_cli_action(&a, &args));
+        });
+        return;
+    }
+    run_cli_action(app, args);
+}
+
+fn run_cli_action(app: &AppHandle, args: &[String]) {
     match cli_action(args) {
         Some("summon") => to_overlays(app, &json!({ "kind": "summon" })),
         Some("panel") => show_panel(app, None, false),
@@ -2025,6 +2065,18 @@ mod tests {
         assert_eq!(cli_action(&args(&["roamies", "--talks"])), None);
         assert_eq!(cli_action(&args(&["--talk"])), None, "the first argument is the program");
         assert_eq!(cli_action(&args(&[])), None);
+    }
+
+    #[test]
+    fn at_reads_the_cursor_after_its_flag() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(cli_at(&args(&["roamies", "--summon", "--at", "812,440.5"])), Some((812.0, 440.5)));
+        assert_eq!(cli_at(&args(&["roamies", "--at", "-10, 20", "--talk"])), Some((-10.0, 20.0)), "a screen left of the main one");
+        assert_eq!(cli_at(&args(&["roamies", "--summon"])), None);
+        assert_eq!(cli_at(&args(&["roamies", "--at"])), None, "no value");
+        assert_eq!(cli_at(&args(&["roamies", "--at", "812"])), None);
+        assert_eq!(cli_at(&args(&["roamies", "--at", "x,1"])), None);
+        assert_eq!(cli_at(&args(&["roamies", "--at", "NaN,1"])), None);
     }
 
     #[test]
