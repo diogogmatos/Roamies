@@ -1,0 +1,55 @@
+# Fork-only: builds the Linux AppImage without the upstream signing secrets. Run it from the Actions tab.
+name: Build Linux AppImage
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Ubuntu 24.04: ONNX Runtime (voice helper) needs glibc 2.38 (see release.yml).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: showcase/tauri
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: showcase/tauri/sidecar/package-lock.json
+
+      - name: Install sidecar dependencies
+        working-directory: showcase/tauri/sidecar
+        run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            showcase/tauri/src-tauri -> target
+            showcase/tauri/src-tauri/voice-win -> target
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev patchelf libfuse2t64 gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+
+      # No updater signing key in a fork, so skip the signed update bundles.
+      - name: Build
+        env:
+          TAURI_BUNDLES: appimage
+        run: ./build.sh release --target x86_64-unknown-linux-gnu --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Roamies-AppImage
+          path: showcase/tauri/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+          if-no-files-found: error

@@ -163,6 +163,8 @@
       look: (x, y) => { lookAt = [x, y]; },
     };
 
+    // Wayland (through XWayland): the cursor is only seen near the overlay's click areas, so following it or moving out of its way acts on stale positions.
+    const WAYLAND = typeof window !== 'undefined' && window.ROAMIE_LINUX === 'wayland';
     // Presence: in auto mode the sidekick hides when idle and comes back for anything it has to do.
     const ORDER = ['materialize', 'crt', 'drop'];
     const forcedVariant = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('enter') : null;
@@ -1197,7 +1199,7 @@
         if (env.mouse?.active || presence.cursor == null) presence.cursor = [env.mouse?.x ?? W / 2, env.mouse?.y ?? H / 2];
         const mx = env.mouse?.x, my = env.mouse?.y;
         presence.ptr = !R.game && mx != null && mx >= 0 && my >= 0 && mx <= W && my <= H ? [mx, my] : null;
-        if (popping) { if (presence.ptr) follow(env, dt); else { m.drive = null; fol.on = false; } }
+        if (popping) { if (presence.ptr && !WAYLAND) follow(env, dt); else { m.drive = null; fol.on = false; } }
         const onStage = stage();
         if (presence.auto) {
           const hover = env.mouse?.active && Math.hypot(env.mouse.x - m.x, env.mouse.y - m.y) < k.R * 1.5;
@@ -1236,7 +1238,7 @@
           }
           // Popped up beside the cursor: it goes where the cursor goes (until it's dragged somewhere).
           if (pen.held) { fol.on = false; m.drive = held ? null : penDrive; station.flee = 0; }
-          else if (!held && station.byCursor && presence.ptr) { follow(env, dt); station.flee = 0; }
+          else if (!held && station.byCursor && presence.ptr && !WAYLAND) { follow(env, dt); station.flee = 0; }
           else { fol.on = false; m.drive = null; }
           nativeStep(dt, self);
           // While drawing, stay put: the user's cursor is supposed to come over here.
@@ -1249,7 +1251,7 @@
             const near = dBody < k.R * 3 || nearBubble;
             // Popped up beside the cursor for a request: stay there while it's talking, listening or working.
             const engaged = station.byCursor && ((b && !b.closing) || tool);
-            station.flee = near && !onIt && !engaged && now > station.quietUntil ? station.flee + dt : Math.max(0, station.flee - dt * 2);
+            station.flee = !WAYLAND && near && !onIt && !engaged && now > station.quietUntil ? station.flee + dt : Math.max(0, station.flee - dt * 2);
             if (station.flee > 0.45 && !station.moving) {
               const [x, y] = pickSpot(cx, cy, m.x, m.y);
               k.stopAct?.(); setStation(x, y); m.goTo(x, y);
