@@ -395,8 +395,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const b = Array.isArray(res.bounds) && res.bounds.length === 4 ? res.bounds : null;
     const scale = pointScale();
     lastShot = iw && ih && b ? { ...shotMap(b, iw, ih, scale), bounds: b, win: null, turn } : null;
-    const whole = t === 'screen' ? '' : ' (one app\'s window can\'t be captured alone on Linux, so this is the whole desktop)';
-    return { content: [{ type: 'text', text: `Screenshot of the whole desktop${whole}${iw ? shotUnits(iw, ih, scale, 'draw') : ''}.` }, await imageBlock(file, 'image/jpeg')] };
+    const whole = t === 'screen' ? '' : ' (one app\'s window can\'t be captured alone on Linux, so this is the whole screen)';
+    return { content: [{ type: 'text', text: `Screenshot of the screen the Roamie is on, the one being worked on${whole}${iw ? shotUnits(iw, ih, scale, 'draw') : ''}.` }, await imageBlock(file, 'image/jpeg')] };
   }
 
   // ---------- drawing on screen (the draw tool) ----------

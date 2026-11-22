@@ -320,6 +320,37 @@ fn desktop_bounds(app: &AppHandle) -> [f64; 4] {
     union_bounds(&screens)
 }
 
+/// The screen the sidekick is on (it moves to the cursor's screen), in the same points as desktop_bounds.
+fn sidekick_screen(app: &AppHandle) -> Option<[f64; 4]> {
+    let label = crate::SIDEKICK_OVERLAY.lock().unwrap().clone()?;
+    let m = app.get_webview_window(&label)?.current_monitor().ok()??;
+    let s = m.scale_factor();
+    Some([m.position().x as f64 / s, m.position().y as f64 / s, m.size().width as f64 / s, m.size().height as f64 / s])
+}
+
+/// Where `screen` sits in a picture of the whole `desktop` that is `pic` pixels: [x, y, w, h] in its pixels, or
+/// None when it's the whole picture anyway (or doesn't fit in it).
+fn crop_rect(pic: (i32, i32), desktop: [f64; 4], screen: [f64; 4]) -> Option<[i32; 4]> {
+    if desktop[2] <= 0.0 || desktop[3] <= 0.0 {
+        return None;
+    }
+    let (kx, ky) = (pic.0 as f64 / desktop[2], pic.1 as f64 / desktop[3]);
+    let x = (((screen[0] - desktop[0]) * kx).round() as i32).clamp(0, pic.0);
+    let y = (((screen[1] - desktop[1]) * ky).round() as i32).clamp(0, pic.1);
+    let w = ((screen[2] * kx).round() as i32).min(pic.0 - x);
+    let h = ((screen[3] * ky).round() as i32).min(pic.1 - y);
+    (w > 0 && h > 0 && (w, h) != pic).then_some([x, y, w, h])
+}
+
+/// The picture cut down to the sidekick's screen: with several screens, one is all that's being worked on, and the
+/// whole desktop shrunk to Claude's cap leaves each screen too small to read.
+fn to_screen(p: gtk::gdk_pixbuf::Pixbuf, desktop: [f64; 4], screen: Option<[f64; 4]>) -> gtk::gdk_pixbuf::Pixbuf {
+    match screen.and_then(|s| crop_rect((p.width(), p.height()), desktop, s)) {
+        Some([x, y, w, h]) => p.new_subpixbuf(x, y, w, h),
+        None => p,
+    }
+}
+
 /// Where the desktop portal will answer a request made with this token: the caller's bus name (":1.42") without
 /// its colon and with dots as underscores, then the token.
 fn portal_request_path(unique_name: &str, token: &str) -> String {
@@ -425,9 +456,11 @@ fn fade_overlays(app: &AppHandle, opacity: f64) {
 /// screenshot_done with the picture's size in pixels and the part of the desktop it covers (in the overlay's
 /// points), or with what went wrong. Main thread only.
 pub(crate) fn screenshot(app: &AppHandle, id: Value, file: String) {
-    let done = |app: &AppHandle, id: &Value, r: Result<(i32, i32), String>| {
+    let desktop = desktop_bounds(app);
+    let screen = sidekick_screen(app);
+    let done = move |app: &AppHandle, id: &Value, r: Result<(i32, i32), String>| {
         let msg = match r {
-            Ok((w, h)) => json!({ "type": "screenshot_done", "id": id, "ok": true, "pixels": [w, h], "bounds": desktop_bounds(app) }),
+            Ok((w, h)) => json!({ "type": "screenshot_done", "id": id, "ok": true, "pixels": [w, h], "bounds": screen.unwrap_or(desktop) }),
             Err(e) => json!({ "type": "screenshot_done", "id": id, "ok": false, "error": e }),
         };
         crate::to_sidecar(app, &msg);
@@ -440,7 +473,7 @@ pub(crate) fn screenshot(app: &AppHandle, id: Value, file: String) {
         gtk::glib::timeout_add_local_once(CLEAR, move || {
             let shot = grab_root();
             fade_overlays(&app, 1.0);
-            done(&app, &id, shot.and_then(|p| save_fitted(&p, &file)));
+            done(&app, &id, shot.and_then(|p| save_fitted(&to_screen(p, desktop, screen), &file)));
         });
         return;
     }
@@ -453,7 +486,7 @@ pub(crate) fn screenshot(app: &AppHandle, id: Value, file: String) {
             let loaded = gtk::gdk_pixbuf::Pixbuf::from_file(&path).map_err(|e| e.to_string());
             // The portal keeps its picture (in Pictures, on most desktops): this one was only for the question asked.
             remove_portal_file(&path);
-            loaded.and_then(|p| save_fitted(&p, &file))
+            loaded.and_then(|p| save_fitted(&to_screen(p, desktop, screen), &file))
         });
         let app2 = app.clone();
         let _ = app.run_on_main_thread(move || done(&app2, &id, r));
@@ -630,6 +663,18 @@ mod tests {
         assert!(!autostart_on("[Desktop Entry]\nExec=roamies\nX-GNOME-Autostart-enabled=false\n"));
         assert!(!autostart_on("[Desktop Entry]\nHidden = True\n"));
         assert!(autostart_on("[Desktop Entry]\nHidden=false\n"));
+    }
+
+    #[test]
+    fn a_screenshot_is_cut_to_the_sidekicks_screen() {
+        // An external 2195x1235 screen above a laptop at (256, 1235), pictured at 1.75x.
+        let desk = union_bounds(&[[0.0, 0.0, 2195.0, 1235.0], [256.0, 1235.0, 1646.0, 1029.0]]);
+        assert_eq!(desk, [0.0, 0.0, 2195.0, 2264.0]);
+        let pic = (3840, 3962);
+        assert_eq!(crop_rect(pic, desk, [256.0, 1235.0, 1646.0, 1029.0]), Some([448, 2161, 2880, 1801]));
+        assert_eq!(crop_rect(pic, desk, [0.0, 0.0, 2195.0, 1235.0]), Some([0, 0, 3840, 2161]));
+        assert_eq!(crop_rect((1646, 1029), [0.0, 0.0, 1646.0, 1029.0], [0.0, 0.0, 1646.0, 1029.0]), None, "one screen: as it is");
+        assert_eq!(crop_rect(pic, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 10.0, 10.0]), None);
     }
 
     #[test]
