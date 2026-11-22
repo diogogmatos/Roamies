@@ -1045,8 +1045,19 @@ fn shows_answer(msg: &Value) -> bool {
 /// The cursor in global points (macOS) or physical pixels (Windows): the units monitor_from_point takes.
 fn cursor_global(app: &AppHandle) -> Option<(f64, f64)> {
     let cur = app.cursor_position().ok()?;
+    if let Some(at) = given_cursor((cur.x, cur.y)) {
+        return Some(at);
+    }
     let s = app.primary_monitor().ok().flatten().map_or(1.0, |m| m.scale_factor());
     Some(cursor_from_raw(cur.x, cur.y, s))
+}
+
+/// The last `--at` position and what XWayland said the cursor was then. Wayland only shows XWayland the pointer over
+/// its own windows, so while it still says the same, `--at` is the newer news.
+static GIVEN_AT: Mutex<Option<((f64, f64), (f64, f64))>> = Mutex::new(None);
+
+fn given_cursor(raw: (f64, f64)) -> Option<(f64, f64)> {
+    GIVEN_AT.lock().unwrap().and_then(|(at, then)| (then == raw).then_some(at))
 }
 
 /// macOS reports the cursor in points times the main screen's scale; Windows in physical pixels as is.
@@ -1490,12 +1501,23 @@ static CURSOR_CLOCK: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 /// can't). Sent to the overlays as one cursor sample, so the action that follows starts beside it.
 fn cursor_at(app: &AppHandle, args: &[String]) -> bool {
     let Some((gx, gy)) = cli_at(args) else { return false };
+    if let Ok(raw) = app.cursor_position() {
+        *GIVEN_AT.lock().unwrap() = Some(((gx, gy), (raw.x, raw.y)));
+    }
+    // To the cursor's screen first. The window reports its new place only once the window manager has moved it.
+    move_sidekick_to(app, gx, gy);
+    let target = app.monitor_from_point(gx, gy).ok().flatten().map(|m| *m.position());
+    let sidekick = SIDEKICK_OVERLAY.lock().unwrap().clone();
     let t = CURSOR_CLOCK.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0;
     for (label, w) in app.webview_windows() {
         if !is_overlay(&label) {
             continue;
         }
         let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor()) else { continue };
+        let pos = match target {
+            Some(p) if sidekick.as_deref() == Some(label.as_str()) => p,
+            _ => pos,
+        };
         let (x, y) = ((gx - pos.x as f64) / scale, (gy - pos.y as f64) / scale);
         // The frame loop naps while the Roamie is hidden: wake it so it takes this sample in before the action.
         let _ = w.eval(format!("window.__roamiePtr&&__roamiePtr({x:.1},{y:.1},{t:.1});window.Roamie?.wake?.()"));
@@ -1577,7 +1599,7 @@ fn pump_cursor(app: AppHandle) {
             continue;
         }
         last_raw = (raw.x, raw.y);
-        let cur = cursor_from_raw(raw.x, raw.y, primary_scale);
+        let cur = given_cursor((raw.x, raw.y)).unwrap_or_else(|| cursor_from_raw(raw.x, raw.y, primary_scale));
         for (label, w) in app.webview_windows() {
             if !is_overlay(&label) {
                 continue;
