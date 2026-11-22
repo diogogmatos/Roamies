@@ -1497,7 +1497,8 @@ fn cursor_at(app: &AppHandle, args: &[String]) -> bool {
         }
         let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor()) else { continue };
         let (x, y) = ((gx - pos.x as f64) / scale, (gy - pos.y as f64) / scale);
-        let _ = w.eval(format!("window.__roamiePtr&&__roamiePtr({x:.1},{y:.1},{t:.1})"));
+        // The frame loop naps while the Roamie is hidden: wake it so it takes this sample in before the action.
+        let _ = w.eval(format!("window.__roamiePtr&&__roamiePtr({x:.1},{y:.1},{t:.1});window.Roamie?.wake?.()"));
     }
     true
 }
@@ -1944,7 +1945,7 @@ fn second_launch(app: &AppHandle, args: &[String]) {
     if cursor_at(app, args) {
         let (app, args) = (app.clone(), args.to_vec());
         thread::spawn(move || {
-            thread::sleep(Duration::from_millis(120));
+            thread::sleep(Duration::from_millis(200));
             let a = app.clone();
             let _ = app.run_on_main_thread(move || run_cli_action(&a, &args));
         });
