@@ -54,6 +54,18 @@ pub(crate) fn init() {
     }
 }
 
+/// Page (CSS) px per GDK px. WebKitGTK zooms pages by the font DPI over 96, so on KDE with "legacy X11 apps scale
+/// themselves" at 175% (Xft.dpi 168) a CSS px is 1.75 window px, while GDK and X11 still count window px.
+/// shortcut: read once and cached; the first call must be on the main thread (setup does it), and a DPI change needs a restart.
+pub(crate) fn page_zoom() -> f64 {
+    static ZOOM: OnceLock<f64> = OnceLock::new();
+    *ZOOM.get_or_init(|| {
+        use gtk::prelude::GtkSettingsExt;
+        let dpi = gtk::Settings::default().map_or(0, |s| s.gtk_xft_dpi());
+        if dpi > 0 { dpi as f64 / 1024.0 / 96.0 } else { 1.0 }
+    })
+}
+
 fn trace() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("ROAMIES_TRACE").is_some())
@@ -78,7 +90,8 @@ fn hit_rects(flat: &[f64]) -> Vec<(i32, i32, i32, i32)> {
 pub(crate) fn set_hit_rects(window: &tauri::WebviewWindow, flat: &[f64]) {
     use gtk::cairo::{RectangleInt, Region};
     use gtk::prelude::WidgetExt;
-    let rects = hit_rects(flat);
+    let z = page_zoom();
+    let rects = hit_rects(&flat.iter().map(|v| v * z).collect::<Vec<_>>());
     // ROAMIES_TRACE=1: the shape goes to stderr, for checking click-through from outside (and for bug reports).
     if trace() {
         eprintln!("hit rects: {rects:?}");
@@ -86,7 +99,7 @@ pub(crate) fn set_hit_rects(window: &tauri::WebviewWindow, flat: &[f64]) {
     let w = window.clone();
     let _ = window.run_on_main_thread(move || {
         let Some(win) = w.gtk_window().ok().and_then(|g| g.window()) else { return };
-        // GDK works in the same logical pixels as the page.
+        // In GDK px (page px times page_zoom, above).
         let list: Vec<RectangleInt> = rects.iter().map(|&(x, y, w, h)| RectangleInt::new(x, y, w, h)).collect();
         let region = Region::create_rectangles(&list);
         win.input_shape_combine_region(&region, 0, 0);

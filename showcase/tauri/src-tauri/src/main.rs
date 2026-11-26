@@ -683,7 +683,7 @@ fn intro_at_tray(app: &AppHandle, tray: Option<tauri::Rect>, text: &str) {
         (p.x + z.width / 2.0, p.y + z.height / 2.0)
     });
     for w in &overlays {
-        let (Ok(pos), Ok(size), Ok(scale)) = (w.inner_position(), w.inner_size(), w.scale_factor()) else { continue };
+        let (Ok(pos), Ok(size), Ok(scale)) = (w.inner_position(), w.inner_size(), w.scale_factor().map(page_scale)) else { continue };
         let (x0, y0, x1) = (pos.x as f64, pos.y as f64, pos.x as f64 + size.width as f64);
         let x = match point {
             Some((px, py)) if px >= x0 && px < x1 && py >= y0 - 50.0 && py < y0 + size.height as f64 => (px - x0) / scale,
@@ -859,7 +859,7 @@ fn place_panel(app: &AppHandle, w: &WebviewWindow, rect: Option<tauri::Rect>) ->
     }
     .or_else(|| app.primary_monitor().ok().flatten());
     let Some(m) = monitor else { return false };
-    let s = m.scale_factor();
+    let s = page_scale(m.scale_factor());
     let wa = m.work_area();
     let (ax, ay, aw, ah) = (wa.position.x as f64, wa.position.y as f64, wa.size.width as f64, wa.size.height as f64);
     let gap = 6.0 * s;
@@ -1413,8 +1413,17 @@ fn notch_js(_x: f64, _w: f64, _h: f64) -> String {
 
 /// Edges of a monitor covered by the menu bar, Dock or taskbar, in CSS px, as a JS call.
 /// On macOS it also carries the camera notch (see notch_js), or null.
+/// Window px per page (CSS) px for a window at `scale`. Linux: WebKitGTK also zooms the page by the font DPI
+/// (linux::page_zoom), which Tauri's scale factor doesn't count.
+fn page_scale(scale: f64) -> f64 {
+    #[cfg(target_os = "linux")]
+    return scale * linux::page_zoom();
+    #[cfg(not(target_os = "linux"))]
+    scale
+}
+
 fn safe_js(mon: &tauri::Monitor) -> String {
-    let s = mon.scale_factor();
+    let s = page_scale(mon.scale_factor());
     let (p, z, wa) = (mon.position(), mon.size(), mon.work_area());
     let top = (wa.position.y - p.y).max(0) as f64 / s;
     let left = (wa.position.x - p.x).max(0) as f64 / s;
@@ -1513,7 +1522,7 @@ fn cursor_at(app: &AppHandle, args: &[String]) -> bool {
         if !is_overlay(&label) {
             continue;
         }
-        let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor()) else { continue };
+        let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor().map(page_scale)) else { continue };
         let pos = match target {
             Some(p) if sidekick.as_deref() == Some(label.as_str()) => p,
             _ => pos,
@@ -1568,7 +1577,7 @@ fn pump_cursor(app: AppHandle) {
                         if !is_overlay(&label) {
                             continue;
                         }
-                        let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor()) else { continue };
+                        let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor().map(page_scale)) else { continue };
                         #[cfg(target_os = "macos")]
                         let (x, y) = {
                             let o = pos.to_logical::<f64>(scale);
@@ -1609,7 +1618,7 @@ fn pump_cursor(app: AppHandle) {
                     let _ = w.eval(safe_js(&mon));
                 }
             }
-            let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor()) else { continue };
+            let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor().map(page_scale)) else { continue };
             // In the overlay's CSS px. macOS: global points minus the window's origin in points (screens
             // can have different scales). Windows: physical pixels, scaled by this window's screen.
             #[cfg(target_os = "macos")]
@@ -2014,6 +2023,9 @@ fn main() {
             id => to_sidecar(app, &json!({ "type": "menu", "id": id })),
         })
         .setup(|app| {
+            // Read on the main thread, before the cursor thread uses it.
+            #[cfg(target_os = "linux")]
+            linux::page_zoom();
             #[cfg(target_os = "macos")]
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
